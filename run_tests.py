@@ -21,6 +21,8 @@ import f90nml
 import xarray
 import pandas
 import subprocess
+import dask
+import numpy
 
 # Constants from GMTB forcing_file_common.py
 g = 9.80665
@@ -48,15 +50,30 @@ class GTMBWRFTest():
         casefile = self.gtmbdir / f'scm/etc/case_config/{self.testcase}.nml'
         casenml = f90nml.read(casefile)
 
+        start = pandas.Timestamp(
+                year=casenml['case_config']['year'],
+                month=casenml['case_config']['month'],
+                day=casenml['case_config']['day'],
+                hour=casenml['case_config']['hour'])
+
         datadir = self.gtmbdir / 'scm/etc' / casenml['case_config']['case_data_dir']
         datafile = datadir / f'{casenml["case_config"]["case_name"]}.nc'
 
+        base = xarray.open_dataset(datafile, decode_cf=False)
+        base.time.attrs['units'] = f'seconds since {start.isoformat()}'
+        base = xarray.decode_cf(base)
+
         initial = xarray.open_dataset(datafile, 'initial')
         forcing = xarray.open_dataset(datafile, 'forcing')
+        
+        initial = initial.update(base)
+        forcing = forcing.update(base)
 
         self.initial_sounding(initial, forcing)
 
-        self.setup_namelist(casenml, forcing.lat.data[0], forcing.lon.data[0])
+        self.setup_namelist(casenml, start, forcing.lat.data[0], forcing.lon.data[0])
+
+        self.setup_forcing(forcing)
 
     def initial_sounding(self, initial, forcing):
         T = forcing.T_nudge.isel(time=0)
@@ -79,18 +96,12 @@ class GTMBWRFTest():
         qvsfc = sounding.qv.isel(levels=0).data
 
         with open(self.workdir / 'input_sounding', 'w') as f:
-            print(zsfc, usfc, vsfc, qvsfc, Tsfc, qvsfc, psfc, file=f)
-            sounding.to_dataframe().to_csv(f, sep=' ', index=False, header=False)
+            print(zsfc, usfc, vsfc, Tsfc, qvsfc, psfc, file=f)
+            sounding.to_dataframe().to_csv(f, columns=['z','u','v','theta','qv'], sep=' ', index=False, header=False)
 
-    def setup_namelist(self, casenml, lat, lon):
+    def setup_namelist(self, casenml, start, lat, lon):
         wrfnml = f90nml.read(self.wrfcfg / 'namelist.input')
         # Translate namelists
-        start = pandas.Timestamp(
-                year=casenml['case_config']['year'],
-                month=casenml['case_config']['month'],
-                day=casenml['case_config']['day'],
-                hour=casenml['case_config']['hour'])
-
         runtime = pandas.Timedelta(casenml['case_config']['runtime'],'seconds')
 
         end = start + runtime
@@ -120,6 +131,60 @@ class GTMBWRFTest():
         with open(self.workdir / 'namelist.input', 'w') as f:
             wrfnml.write(f)
 
+    def setup_forcing(self, forcing):
+        zero = (['time','levels'], dask.array.zeros((forcing.time.size, forcing.levels.size), dtype='f4'))
+
+        Times = numpy.datetime_as_string(forcing.time, unit='s')
+        Times = [t.replace('T','_') for t in Times]
+        print(Times)
+
+        wrf_forcing = xarray.Dataset({
+                'Times': (['time'], Times),
+                'Z_FORCE': zero, # TODO: Calculate heights
+                'U_G': forcing.u_g.T,
+                'V_G': forcing.v_g.T,
+                'W_SUBS': forcing.w_ls.T,
+                'TH_UPSTREAM_X': zero,
+                'TH_UPSTREAM_Y': zero,
+                'QV_UPSTREAM_X': zero,
+                'QV_UPSTREAM_Y': zero,
+                'U_UPSTREAM_X': zero,
+                'U_UPSTREAM_Y': zero,
+                'V_UPSTREAM_X': zero,
+                'V_UPSTREAM_Y': zero,
+                'Z_FORCE_TEND': zero,
+                'U_G_TEND': zero,
+                'V_G_TEND': zero,
+                'W_SUBS_TEND': zero,
+                'TH_UPSTREAM_X_TEND': zero,
+                'TH_UPSTREAM_Y_TEND': zero,
+                'QV_UPSTREAM_X_TEND': zero,
+                'QV_UPSTREAM_Y_TEND': zero,
+                'U_UPSTREAM_X_TEND': zero,
+                'U_UPSTREAM_Y_TEND': zero,
+                'V_UPSTREAM_X_TEND': zero,
+                'V_UPSTREAM_Y_TEND': zero,
+                'TAU_X': zero,
+                'TAU_X_TEND': zero,
+                'TAU_Y': zero,
+                'TAU_Y_TEND': zero,
+            })
+        wrf_forcing.Times.encoding['dtype'] = 'S1'
+
+        wrf_ideal = xarray.open_dataset(self.workdir / 'force_ideal.nc')
+        #for k, v in wrf_forcing.items():
+        #    if k in wrf_ideal:
+        #        v.attrs = wrf_ideal[k].attrs
+        wrf_forcing.attrs = wrf_ideal.attrs
+
+        wrf_forcing.to_netcdf(self.workdir / 'force_test.nc')
+
+        wrfnml = f90nml.read(self.workdir / 'namelist.input')
+        wrfnml['time_control']['auxinput3_inname'] = 'force_test.nc'
+        wrfnml['time_control']['auxinput3_interval_h'] = 3
+        wrfnml.write(self.workdir / 'namelist.input', force=True)
+
+
     def run_testcase(self):
         self.setup_workdir()
         self.setup_config()
@@ -134,12 +199,12 @@ class GTMBWRFTest():
 
 
 if __name__ == '__main__':
-    ts = pandas.Timestamp.utcnow().isoformat()
+    ts = pandas.Timestamp.utcnow().strftime('%Y%m%dT%H%M%S')
     test = GTMBWRFTest(
             testcase = 'twpice',
             gtmbdir = '../gmtb-scm-release',
             wrfcfg = 'wrf_in',
-            workdir = f'test/{ts}-twpice',
+            workdir = f'test/twpice-{ts}',
             wrfmain = '../WRF4/WRFV3/main',
             )
     test.run_testcase()
