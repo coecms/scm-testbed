@@ -23,6 +23,7 @@ import pandas
 import subprocess
 import dask
 import numpy
+import argparse
 
 # Constants from GMTB forcing_file_common.py
 g = 9.80665
@@ -32,6 +33,25 @@ p0 = 100000.0
 L_v = 2.5E6
 L_s = 2.834E6
 
+
+def pressure_to_z(zsfc, T, p):
+    """
+    Convert GMTB pressure levels to heights
+
+    Args:
+        zsfc: Surface height
+        T: Temperature
+        p: GMTB pressure levels
+    """
+    # Following GMTB 'forcing_file_common.py'
+    z = numpy.zeros(T.shape)
+    z[:,0] = zsfc
+    for k in range(p.size - 1):
+        dphi = -0.5*R_dry*((T[:,k]+T[:,k+1])/(0.5*(p[k]+p[k+1])))*(p[k+1]-p[k])
+        z[:,k+1] = z[:,k]+dphi/g
+    return z
+
+
 class GTMBWRFTest():
     def __init__(self, testcase, gtmbdir, wrfcfg, workdir, wrfmain):
         self.testcase = testcase
@@ -40,11 +60,13 @@ class GTMBWRFTest():
         self.workdir = Path(workdir)
         self.wrfmain = Path(wrfmain)
 
+
     def setup_workdir(self):
         self.workdir.mkdir()
         for c in self.wrfcfg.iterdir():
             if c.name != 'namelist.input':
                 (self.workdir / c.name).symlink_to(c.resolve())
+
 
     def setup_config(self):
         casefile = self.gtmbdir / f'scm/etc/case_config/{self.testcase}.nml'
@@ -73,9 +95,18 @@ class GTMBWRFTest():
 
         self.setup_namelist(casenml, start, forcing.lat.data[0], forcing.lon.data[0])
 
-        self.setup_forcing(forcing)
+        zsfc = initial.height[0]
+        self.setup_forcing(zsfc, forcing)
+
 
     def initial_sounding(self, initial, forcing):
+        """
+        Setup the WRF initial sounding
+
+        Args:
+            inital: GMTB initial sounding
+            forcing: GMTB forcing
+        """
         T = forcing.T_nudge.isel(time=0)
 
         sounding = xarray.Dataset({
@@ -90,16 +121,25 @@ class GTMBWRFTest():
         psfc = forcing.p_surf.isel(time=0).data
 
         # Grab the first level of the input sounding as the surface values
-        zsfc = 0
+        zsfc = initial.height.isel(levels=0).data
         usfc = sounding.u.isel(levels=0).data
         vsfc = sounding.v.isel(levels=0).data
         qvsfc = sounding.qv.isel(levels=0).data
 
         with open(self.workdir / 'input_sounding', 'w') as f:
             print(zsfc, usfc, vsfc, Tsfc, qvsfc, psfc, file=f)
-            sounding.to_dataframe().to_csv(f, columns=['z','u','v','theta','qv'], sep=' ', index=False, header=False)
+            sounding.isel(levels=slice(1,None)).to_dataframe().to_csv(f, columns=['z','u','v','theta','qv'], sep=' ', index=False, header=False)
+
 
     def setup_namelist(self, casenml, start, lat, lon):
+        """
+        Setup the WRF namelist to perform a GMTB run
+
+        Args:
+            casenml (f90nml): GMTB namelist
+            start (pandas.Timestamp): Start time
+            lat, lon: Model location
+        """
         wrfnml = f90nml.read(self.wrfcfg / 'namelist.input')
         # Translate namelists
         runtime = pandas.Timedelta(casenml['case_config']['runtime'],'seconds')
@@ -113,10 +153,10 @@ class GTMBWRFTest():
         wrfnml['time_control']['start_minute'] = start.minute
         wrfnml['time_control']['start_second'] = start.second
 
-        wrfnml['time_control']['run_days'] = runtime.days
-        wrfnml['time_control']['run_hours'] = 0
-        wrfnml['time_control']['run_minutes'] = 0
-        wrfnml['time_control']['run_seconds'] = runtime.seconds
+        wrfnml['time_control']['run_days'] = runtime.components.days
+        wrfnml['time_control']['run_hours'] = runtime.components.hours
+        wrfnml['time_control']['run_minutes'] = runtime.components.minutes
+        wrfnml['time_control']['run_seconds'] = runtime.components.seconds
 
         wrfnml['time_control']['end_year'] = end.year
         wrfnml['time_control']['end_month'] = end.month
@@ -131,16 +171,29 @@ class GTMBWRFTest():
         with open(self.workdir / 'namelist.input', 'w') as f:
             wrfnml.write(f)
 
-    def setup_forcing(self, forcing):
-        zero = (['time','levels'], dask.array.zeros((forcing.time.size, forcing.levels.size), dtype='f4'))
 
+    def setup_forcing(self, zsfc, forcing):
+        """
+        Setup SCM forcing file by converting GMTB values
+
+        Args:
+            zsfc: Surface height (used to convert GMTB pressure levels to
+                    height)
+            forcing: GMTB forcing
+        """
+        # Convert pressure levels to heights
+        z = pressure_to_z(zsfc, forcing.T_nudge.T, forcing.levels)
+
+        # Setup WRF times
         Times = numpy.datetime_as_string(forcing.time, unit='s')
         Times = [t.replace('T','_') for t in Times]
-        print(Times)
+
+        # Empty array
+        zero = (['time','levels'], dask.array.zeros((forcing.time.size, forcing.levels.size), dtype='f4'))
 
         wrf_forcing = xarray.Dataset({
                 'Times': (['time'], Times),
-                'Z_FORCE': zero, # TODO: Calculate heights
+                'Z_FORCE': (['time', 'levels'], z),
                 'U_G': forcing.u_g.T,
                 'V_G': forcing.v_g.T,
                 'W_SUBS': forcing.w_ls.T,
@@ -171,40 +224,50 @@ class GTMBWRFTest():
             })
         wrf_forcing.Times.encoding['dtype'] = 'S1'
 
+        # Copy metadata from sample forcing file
         wrf_ideal = xarray.open_dataset(self.workdir / 'force_ideal.nc')
-        #for k, v in wrf_forcing.items():
-        #    if k in wrf_ideal:
-        #        v.attrs = wrf_ideal[k].attrs
+        for k, v in wrf_forcing.items():
+            if k in wrf_ideal:
+                v.attrs = wrf_ideal[k].attrs
         wrf_forcing.attrs = wrf_ideal.attrs
 
+        # Save to file
         wrf_forcing.to_netcdf(self.workdir / 'force_test.nc')
+
+        # Update namelist with forcing details
+        interval = pandas.Timedelta((forcing.time[1] - forcing.time[0]).values).components
 
         wrfnml = f90nml.read(self.workdir / 'namelist.input')
         wrfnml['time_control']['auxinput3_inname'] = 'force_test.nc'
-        wrfnml['time_control']['auxinput3_interval_h'] = 3
+        wrfnml['time_control']['auxinput3_interval_d'] = interval.days
+        wrfnml['time_control']['auxinput3_interval_h'] = interval.hours
+        wrfnml['time_control']['auxinput3_interval_m'] = interval.minutes
+        wrfnml['time_control']['auxinput3_interval_s'] = interval.seconds
         wrfnml.write(self.workdir / 'namelist.input', force=True)
 
 
     def run_testcase(self):
         self.setup_workdir()
         self.setup_config()
-        self.run_ideal()
-        self.run_wrf()
 
-    def run_ideal(self):
         subprocess.run([self.wrfmain.resolve() / 'ideal.exe'], cwd=self.workdir)
-
-    def run_wrf(self):
         subprocess.run([self.wrfmain.resolve() / 'wrf.exe'], cwd=self.workdir)
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gmtb-repo', help='Path to local GMTB repository', required=True)
+    parser.add_argument('--wrf-main', help='Path containing ideal.exe and wrf.exe', required=True)
+    parser.add_argument('--testcase', help='Testcase to run', required=True)
+    args = parser.parse_args()
+
     ts = pandas.Timestamp.utcnow().strftime('%Y%m%dT%H%M%S')
+    
     test = GTMBWRFTest(
-            testcase = 'twpice',
-            gtmbdir = '../gmtb-scm-release',
+            testcase = args.testcase,
+            gtmbdir = args.gmtb_repo,
             wrfcfg = 'wrf_in',
-            workdir = f'test/twpice-{ts}',
-            wrfmain = '../WRF4/WRFV3/main',
+            workdir = f'test/{args.testcase}-{ts}',
+            wrfmain = args.wrf_main,
             )
     test.run_testcase()
