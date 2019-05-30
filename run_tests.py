@@ -52,16 +52,32 @@ def pressure_to_z(zsfc, T, p):
     return z
 
 
-class GTMBWRFTest():
-    def __init__(self, testcase, gtmbdir, wrfcfg, workdir, wrfmain):
+class gmtbWRFTest():
+    def __init__(self, testcase, gmtbdir, wrfcfg, workdir, wrfmain):
+        """
+        Initialise paths needed by the test run
+
+        Sets up a new WRF configuration based on the files in 'wrfcfg'
+
+        Args:
+            gmtbdir: Path to gmtb repository, used to find test case inputs
+            wrfcfg: Path to WRF configuration
+            workdir: Directory to run WRF in
+            wrfmain: Parent path of ideal.exe and wrf.exe
+        """
         self.testcase = testcase
-        self.gtmbdir = Path(gtmbdir)
+        self.gmtbdir = Path(gmtbdir)
         self.wrfcfg = Path(wrfcfg)
         self.workdir = Path(workdir)
         self.wrfmain = Path(wrfmain)
 
 
     def setup_workdir(self):
+        """
+        Create the run directory and link files from the config directory
+
+        The namelist is handled by 'setup_namelist()'
+        """
         self.workdir.mkdir()
         for c in self.wrfcfg.iterdir():
             if c.name != 'namelist.input':
@@ -69,7 +85,13 @@ class GTMBWRFTest():
 
 
     def setup_config(self):
-        casefile = self.gtmbdir / f'scm/etc/case_config/{self.testcase}.nml'
+        """
+        Top level setup for a test case
+
+        Reads the GMTB test configuration and input files, then sets up the WRF
+        run appropriately
+        """
+        casefile = self.gmtbdir / f'scm/etc/case_config/{self.testcase}.nml'
         casenml = f90nml.read(casefile)
 
         start = pandas.Timestamp(
@@ -78,7 +100,7 @@ class GTMBWRFTest():
                 day=casenml['case_config']['day'],
                 hour=casenml['case_config']['hour'])
 
-        datadir = self.gtmbdir / 'scm/etc' / casenml['case_config']['case_data_dir']
+        datadir = self.gmtbdir / 'scm/etc' / casenml['case_config']['case_data_dir']
         datafile = datadir / f'{casenml["case_config"]["case_name"]}.nc'
 
         base = xarray.open_dataset(datafile, decode_cf=False)
@@ -102,6 +124,11 @@ class GTMBWRFTest():
     def initial_sounding(self, initial, forcing):
         """
         Setup the WRF initial sounding
+
+        The first height level in the forcing dataset is the surface height
+
+        Theta and qv are found following equations 5.1 and 5.2 of the GMTB tech
+        guide
 
         Args:
             inital: GMTB initial sounding
@@ -134,6 +161,9 @@ class GTMBWRFTest():
     def setup_namelist(self, casenml, start, lat, lon):
         """
         Setup the WRF namelist to perform a GMTB run
+
+        Gets the start date and duration from the GMTB namelist
+        lat,lon location must be read from the forcing file
 
         Args:
             casenml (f90nml): GMTB namelist
@@ -247,6 +277,9 @@ class GTMBWRFTest():
 
 
     def run_testcase(self):
+        """
+        Setup and run the testcase
+        """
         self.setup_workdir()
         self.setup_config()
 
@@ -263,9 +296,9 @@ if __name__ == '__main__':
 
     ts = pandas.Timestamp.utcnow().strftime('%Y%m%dT%H%M%S')
     
-    test = GTMBWRFTest(
+    test = gmtbWRFTest(
             testcase = args.testcase,
-            gtmbdir = args.gmtb_repo,
+            gmtbdir = args.gmtb_repo,
             wrfcfg = 'wrf_in',
             workdir = f'test/{args.testcase}-{ts}',
             wrfmain = args.wrf_main,
