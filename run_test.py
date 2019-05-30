@@ -291,7 +291,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--gmtb-repo', help='Path to local GMTB repository', required=True)
     parser.add_argument('--wrf-main', help='Path containing ideal.exe and wrf.exe', required=True)
-    parser.add_argument('--testcase', help='Testcase to run', required=True)
+    parser.add_argument('testcase', help='Testcase to run')
     args = parser.parse_args()
 
     ts = pandas.Timestamp.utcnow().strftime('%Y%m%dT%H%M%S')
