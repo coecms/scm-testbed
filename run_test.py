@@ -72,55 +72,6 @@ class gmtbWRFTest():
         self.wrfmain = Path(wrfmain)
 
 
-    def setup_workdir(self):
-        """
-        Create the run directory and link files from the config directory
-
-        The namelist is handled by 'setup_namelist()'
-        """
-        self.workdir.mkdir()
-        for c in self.wrfcfg.iterdir():
-            if c.name != 'namelist.input':
-                (self.workdir / c.name).symlink_to(c.resolve())
-
-
-    def setup_config(self):
-        """
-        Top level setup for a test case
-
-        Reads the GMTB test configuration and input files, then sets up the WRF
-        run appropriately
-        """
-        casefile = self.gmtbdir / f'scm/etc/case_config/{self.testcase}.nml'
-        casenml = f90nml.read(casefile)
-
-        start = pandas.Timestamp(
-                year=casenml['case_config']['year'],
-                month=casenml['case_config']['month'],
-                day=casenml['case_config']['day'],
-                hour=casenml['case_config']['hour'])
-
-        datadir = self.gmtbdir / 'scm/etc' / casenml['case_config']['case_data_dir']
-        datafile = datadir / f'{casenml["case_config"]["case_name"]}.nc'
-
-        base = xarray.open_dataset(datafile, decode_cf=False)
-        base.time.attrs['units'] = f'seconds since {start.isoformat()}'
-        base = xarray.decode_cf(base)
-
-        initial = xarray.open_dataset(datafile, 'initial')
-        forcing = xarray.open_dataset(datafile, 'forcing')
-        
-        initial = initial.update(base)
-        forcing = forcing.update(base)
-
-        self.initial_sounding(initial, forcing)
-
-        self.setup_namelist(casenml, start, forcing.lat.data[0], forcing.lon.data[0])
-
-        zsfc = initial.height[0]
-        self.setup_forcing(zsfc, forcing)
-
-
     def initial_sounding(self, initial, forcing):
         """
         Setup the WRF initial sounding
@@ -276,6 +227,54 @@ class gmtbWRFTest():
         wrfnml.write(self.workdir / 'namelist.input', force=True)
 
 
+    def setup_workdir(self):
+        """
+        Create the run directory and link files from the config directory
+
+        The namelist is handled by 'setup_namelist()'
+        """
+        for c in self.wrfcfg.iterdir():
+            if c.name != 'namelist.input':
+                (self.workdir / c.name).symlink_to(c.resolve())
+
+
+    def setup_config(self):
+        """
+        Top level setup for a test case
+
+        Reads the GMTB test configuration and input files, then sets up the WRF
+        run appropriately
+        """
+        casefile = self.gmtbdir / f'scm/etc/case_config/{self.testcase}.nml'
+        casenml = f90nml.read(casefile)
+
+        start = pandas.Timestamp(
+                year=casenml['case_config']['year'],
+                month=casenml['case_config']['month'],
+                day=casenml['case_config']['day'],
+                hour=casenml['case_config']['hour'])
+
+        datadir = self.gmtbdir / 'scm/etc' / casenml['case_config']['case_data_dir']
+        datafile = datadir / f'{casenml["case_config"]["case_name"]}.nc'
+
+        base = xarray.open_dataset(datafile, decode_cf=False)
+        base.time.attrs['units'] = f'seconds since {start.isoformat()}'
+        base = xarray.decode_cf(base)
+
+        initial = xarray.open_dataset(datafile, 'initial')
+        forcing = xarray.open_dataset(datafile, 'forcing')
+        
+        initial = initial.update(base)
+        forcing = forcing.update(base)
+
+        self.initial_sounding(initial, forcing)
+
+        self.setup_namelist(casenml, start, forcing.lat.data[0], forcing.lon.data[0])
+
+        zsfc = initial.height[0]
+        self.setup_forcing(zsfc, forcing)
+
+
     def run_testcase(self):
         """
         Setup and run the testcase
@@ -295,12 +294,19 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     ts = pandas.Timestamp.utcnow().strftime('%Y%m%dT%H%M%S')
+    outdir = Path(f'output/{args.testcase}-{ts}')
+    outdir.mkdir(parents=True)
+
+    latest = Path(f'output/{args.testcase}-latest')
+    if latest.is_symlink():
+        latest.unlink()
+    latest.symlink_to(outdir.name)
     
     test = gmtbWRFTest(
             testcase = args.testcase,
             gmtbdir = args.gmtb_repo,
             wrfcfg = 'wrf_in',
-            workdir = f'test/{args.testcase}-{ts}',
+            workdir = outdir,
             wrfmain = args.wrf_main,
             )
     test.run_testcase()
