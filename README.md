@@ -2,6 +2,18 @@ Run GMTB test cases using WRF
 =============================
 
 
+## Initial setup
+
+Download the test case using
+
+    git clone https://github.com/coemcs/scm-testbed
+
+You will also need the GTMB code (you don't need to compile it)
+
+    git clone https://github.com/NCAR/gmtb-scm-release
+
+And a compiled copy of WRF
+
 ## Configuring experiments
 
 Edit the WRF configuration in 'wrf_in' as desired. Files from here will be linked in to the run directory, including the WRF namelist
