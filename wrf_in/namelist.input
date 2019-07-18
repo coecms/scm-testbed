@@ -38,7 +38,7 @@
  s_sn                                = 1,
  e_sn                                = 3,
  s_vert                              = 1,
- e_vert                              = 60,
+ e_vert                              = 64,
  dx                                  = 4000,
  dy                                  = 4000,
  ztop                                = 12000.,

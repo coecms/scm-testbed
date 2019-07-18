@@ -24,6 +24,7 @@ import subprocess
 import dask
 import numpy
 import argparse
+from math import ceil
 
 # Constants from GMTB forcing_file_common.py
 g = 9.80665
@@ -50,6 +51,12 @@ def pressure_to_z(zsfc, T, p):
         dphi = -0.5*R_dry*((T[:,k]+T[:,k+1])/(0.5*(p[k]+p[k+1])))*(p[k+1]-p[k])
         z[:,k+1] = z[:,k]+dphi/g
     return z
+
+def qv(qt, ql, qi):
+    return qt - ql - qi
+
+def theta(thetail, ql, qi, T):
+    return thetail/(1-(L_v/c_p*ql+L_s/c_p*qi)/T)
 
 
 class gmtbWRFTest():
@@ -91,8 +98,8 @@ class gmtbWRFTest():
             'z': initial.height,
             'u': initial.u,
             'v': initial.v,
-            'theta': initial.thetail/(1-(L_v/c_p*initial.ql+L_s/c_p*initial.qi)/T),
-            'qv': initial.qt - initial.ql - initial.qi,
+            'theta': theta(initial.thetail, initial.ql, initial.qi, T),
+            'qv': qv(initial.qt, initial.ql, initial.qi),
             })
 
         Tsfc = forcing.T_surf.isel(time=0).data
@@ -109,7 +116,7 @@ class gmtbWRFTest():
             sounding.isel(levels=slice(1,None)).to_dataframe().to_csv(f, columns=['z','u','v','theta','qv'], sep=' ', index=False, header=False)
 
 
-    def setup_namelist(self, casenml, start, lat, lon):
+    def setup_namelist(self, casenml, start, lat, lon, ztop, forcing_levels):
         """
         Setup the WRF namelist to perform a GMTB run
 
@@ -124,8 +131,20 @@ class gmtbWRFTest():
         wrfnml = f90nml.read(self.wrfcfg / 'namelist.input')
         # Translate namelists
         runtime = pandas.Timedelta(casenml['case_config']['runtime'],'seconds')
+        #runtime = pandas.Timedelta(2, 'day')
 
         end = start + runtime
+
+        if casenml['case_config']['sfc_type'] == 0:
+            # Ocean
+            wrfnml['scm']['scm_lu_index'] = 16
+            wrfnml['scm']['scm_vegfra'] = 0
+            wrfnml['scm']['scm_isltyp'] = 14
+
+        if casenml['case_config']['thermo_forcing_type'] == 2:
+            #wrfnml['scm']['scm_qv_adv'] = True
+            #wrfnml['scm']['scm_th_adv'] = True
+            pass
 
         wrfnml['time_control']['start_year'] = start.year
         wrfnml['time_control']['start_month'] = start.month
@@ -146,6 +165,25 @@ class gmtbWRFTest():
         wrfnml['time_control']['end_minute'] = end.minute
         wrfnml['time_control']['end_second'] = end.second
 
+        #wrfnml['time_control']['auxinput3_begin_y'] = start.year
+        #wrfnml['time_control']['auxinput3_begin_d'] = start.da
+        #wrfnml['time_control']['auxinput3_begin_h'] = -6
+        #wrfnml['time_control']['auxinput3_begin_m'] = start.minute
+        #wrfnml['time_control']['auxinput3_begin_s'] = start.second
+
+        # Ceil to km
+        wrfnml['domains']['ztop'] = ceil(ztop / 1000) * 1000
+
+        wrfnml['scm']['scm_force'] = 1
+        wrfnml['scm']['scm_force_wind_largescale'] = True
+        wrfnml['scm']['scm_force_qv_largescale'] = True
+        wrfnml['scm']['scm_force_ql_largescale'] = True
+        wrfnml['scm']['scm_vert_adv'] = True
+        wrfnml['scm']['scm_th_t_tend'] = False
+        wrfnml['scm']['scm_qv_t_tend'] = False
+
+        wrfnml['scm']['num_force_layers'] = forcing_levels
+
         wrfnml['scm']['scm_lat'] = lat
         wrfnml['scm']['scm_lat'] = lon
 
@@ -153,7 +191,7 @@ class gmtbWRFTest():
             wrfnml.write(f)
 
 
-    def setup_forcing(self, zsfc, forcing):
+    def setup_forcing(self, casenml, zsfc, forcing):
         """
         Setup SCM forcing file by converting GMTB values
 
@@ -172,44 +210,57 @@ class gmtbWRFTest():
         # Empty array
         zero = (['time','levels'], dask.array.zeros((forcing.time.size, forcing.levels.size), dtype='f4'))
 
+        domain = 4000
+        wind_mag = numpy.sqrt(forcing.u_nudge**2 + forcing.v_nudge**2)
+        tau = domain/(2*wind_mag)
+        print(tau.min(), tau.mean(), tau.max())
+
         wrf_forcing = xarray.Dataset({
                 'Times': (['time'], Times),
                 'Z_FORCE': (['time', 'levels'], z),
-                'U_G': forcing.u_g.T,
-                'V_G': forcing.v_g.T,
-                'W_SUBS': forcing.w_ls.T,
-                'TH_UPSTREAM_X': zero,
-                'TH_UPSTREAM_Y': zero,
-                'QV_UPSTREAM_X': zero,
-                'QV_UPSTREAM_Y': zero,
-                'U_UPSTREAM_X': zero,
-                'U_UPSTREAM_Y': zero,
-                'V_UPSTREAM_X': zero,
-                'V_UPSTREAM_Y': zero,
-                'Z_FORCE_TEND': zero,
-                'U_G_TEND': zero,
-                'V_G_TEND': zero,
-                'W_SUBS_TEND': zero,
-                'TH_UPSTREAM_X_TEND': zero,
-                'TH_UPSTREAM_Y_TEND': zero,
-                'QV_UPSTREAM_X_TEND': zero,
-                'QV_UPSTREAM_Y_TEND': zero,
-                'U_UPSTREAM_X_TEND': zero,
-                'U_UPSTREAM_Y_TEND': zero,
-                'V_UPSTREAM_X_TEND': zero,
-                'V_UPSTREAM_Y_TEND': zero,
-                'TAU_X': zero,
-                'TAU_X_TEND': zero,
-                'TAU_Y': zero,
-                'TAU_Y_TEND': zero,
+                'U_G': forcing.u_nudge,
+                'V_G': forcing.v_g,
+                'W_SUBS': forcing.w_ls,
+                'U_LARGESCALE': forcing.u_nudge,
+                'V_LARGESCALE': forcing.v_nudge,
+                'QV_LARGESCALE': forcing.qt_nudge,
+                'TH_LARGESCALE': forcing.thil_nudge,
+                'TAU_LARGESCALE': tau,
+                'SURFACE_T': forcing.T_surf,
+                'SURFACE_P': forcing.p_surf,
+                #'TH_UPSTREAM_X': zero,
+                #'TH_UPSTREAM_Y': zero,
+                #'QV_UPSTREAM_X': zero,
+                #'QV_UPSTREAM_Y': zero,
+                #'U_UPSTREAM_X': zero,
+                #'U_UPSTREAM_Y': zero,
+                #'V_UPSTREAM_X': zero,
+                #'V_UPSTREAM_Y': zero,
+                #'Z_FORCE_TEND': zero,
+                #'U_G_TEND': zero,
+                #'V_G_TEND': zero,
+                #'W_SUBS_TEND': zero,
+                #'TH_UPSTREAM_X_TEND': zero,
+                #'TH_UPSTREAM_Y_TEND': zero,
+                #'QV_UPSTREAM_X_TEND': zero,
+                #'QV_UPSTREAM_Y_TEND': zero,
+                #'U_UPSTREAM_X_TEND': zero,
+                #'U_UPSTREAM_Y_TEND': zero,
+                #'V_UPSTREAM_X_TEND': zero,
+                #'V_UPSTREAM_Y_TEND': zero,
+                #'TAU_X': zero,
+                #'TAU_X_TEND': zero,
+                #'TAU_Y': zero,
+                #'TAU_Y_TEND': zero,
             })
         wrf_forcing.Times.encoding['dtype'] = 'S1'
+        wrf_forcing = wrf_forcing.transpose('time','levels')
 
         # Copy metadata from sample forcing file
         wrf_ideal = xarray.open_dataset(self.workdir / 'force_ideal.nc')
         for k, v in wrf_forcing.items():
-            if k in wrf_ideal:
-                v.attrs = wrf_ideal[k].attrs
+            v.attrs['FieldType'] = 104
+
         wrf_forcing.attrs = wrf_ideal.attrs
 
         # Save to file
@@ -269,10 +320,12 @@ class gmtbWRFTest():
 
         self.initial_sounding(initial, forcing)
 
-        self.setup_namelist(casenml, start, forcing.lat.data[0], forcing.lon.data[0])
-
         zsfc = initial.height[0]
-        self.setup_forcing(zsfc, forcing)
+        ztop = initial.height[-1]
+
+        self.setup_namelist(casenml, start, forcing.lat.data[0], forcing.lon.data[0], ztop, len(initial.height))
+
+        self.setup_forcing(casenml, zsfc, forcing)
 
 
     def run_testcase(self):
