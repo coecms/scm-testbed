@@ -111,6 +111,7 @@ class gmtbWRFTest():
         vsfc = sounding.v.isel(levels=0).data
         qvsfc = sounding.qv.isel(levels=0).data
 
+        # Write out sounding file as a space-separated table
         with open(self.workdir / 'input_sounding', 'w') as f:
             print(zsfc, usfc, vsfc, Tsfc, qvsfc, psfc, file=f)
             sounding.isel(levels=slice(1,None)).to_dataframe().to_csv(f, columns=['z','u','v','theta','qv'], sep=' ', index=False, header=False)
@@ -129,23 +130,20 @@ class gmtbWRFTest():
             lat, lon: Model location
         """
         wrfnml = f90nml.read(self.wrfcfg / 'namelist.input')
-        # Translate namelists
         runtime = pandas.Timedelta(casenml['case_config']['runtime'],'seconds')
-        #runtime = pandas.Timedelta(2, 'day')
 
         end = start + runtime
 
+        # Translate namelists
+
+        # Set up surface types
         if casenml['case_config']['sfc_type'] == 0:
             # Ocean
             wrfnml['scm']['scm_lu_index'] = 16
             wrfnml['scm']['scm_vegfra'] = 0
             wrfnml['scm']['scm_isltyp'] = 14
 
-        if casenml['case_config']['thermo_forcing_type'] == 2:
-            #wrfnml['scm']['scm_qv_adv'] = True
-            #wrfnml['scm']['scm_th_adv'] = True
-            pass
-
+        # Set up dates
         wrfnml['time_control']['start_year'] = start.year
         wrfnml['time_control']['start_month'] = start.month
         wrfnml['time_control']['start_day'] = start.day
@@ -165,28 +163,24 @@ class gmtbWRFTest():
         wrfnml['time_control']['end_minute'] = end.minute
         wrfnml['time_control']['end_second'] = end.second
 
-        #wrfnml['time_control']['auxinput3_begin_y'] = start.year
-        #wrfnml['time_control']['auxinput3_begin_d'] = start.da
-        #wrfnml['time_control']['auxinput3_begin_h'] = -6
-        #wrfnml['time_control']['auxinput3_begin_m'] = start.minute
-        #wrfnml['time_control']['auxinput3_begin_s'] = start.second
-
-        # Ceil to km
+        # Round up max height to next km
         wrfnml['domains']['ztop'] = ceil(ztop / 1000) * 1000
 
+        # Turn on forcing variables
         wrfnml['scm']['scm_force'] = 1
         wrfnml['scm']['scm_force_wind_largescale'] = True
         wrfnml['scm']['scm_force_qv_largescale'] = True
-        wrfnml['scm']['scm_force_ql_largescale'] = True
         wrfnml['scm']['scm_vert_adv'] = True
         wrfnml['scm']['scm_th_t_tend'] = False
         wrfnml['scm']['scm_qv_t_tend'] = False
 
         wrfnml['scm']['num_force_layers'] = forcing_levels
 
+        # SCM location
         wrfnml['scm']['scm_lat'] = lat
         wrfnml['scm']['scm_lat'] = lon
 
+        # Write out namelist
         with open(self.workdir / 'namelist.input', 'w') as f:
             wrfnml.write(f)
 
@@ -210,10 +204,10 @@ class gmtbWRFTest():
         # Empty array
         zero = (['time','levels'], dask.array.zeros((forcing.time.size, forcing.levels.size), dtype='f4'))
 
+        # Large-scale Timescale    
         domain = 4000
         wind_mag = numpy.sqrt(forcing.u_nudge**2 + forcing.v_nudge**2)
         tau = domain/(2*wind_mag)
-        print(tau.min(), tau.mean(), tau.max())
 
         wrf_forcing = xarray.Dataset({
                 'Times': (['time'], Times),
@@ -254,6 +248,8 @@ class gmtbWRFTest():
                 #'TAU_Y_TEND': zero,
             })
         wrf_forcing.Times.encoding['dtype'] = 'S1'
+
+        # Ensure all variables are in the correct order
         wrf_forcing = wrf_forcing.transpose('time','levels')
 
         # Copy metadata from sample forcing file
@@ -268,7 +264,6 @@ class gmtbWRFTest():
 
         # Update namelist with forcing details
         interval = pandas.Timedelta((forcing.time[1] - forcing.time[0]).values).components
-
         wrfnml = f90nml.read(self.workdir / 'namelist.input')
         wrfnml['time_control']['auxinput3_inname'] = 'force_test.nc'
         wrfnml['time_control']['auxinput3_interval_d'] = interval.days

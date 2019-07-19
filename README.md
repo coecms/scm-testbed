@@ -46,3 +46,11 @@ Arguments:
 Output files from a run can be found in `output/{testcase}-{timestamp}`, e.g. `output/twpice-20190529T013725`. The timestamp is intended to provide a historical record of previous runs
 
 The most recent run is also available through a symbolic link `output/{testcase}-latest`
+
+## Plotting
+
+The script `scm-compare.py` will create a comparison plot of the GMTB forcing and the WRF output for several variables. It can be run like:
+
+    python scm-compare.py --gmtb-repo /path/to/gmtb-scm-release twpice
+
+to compare the most recent `twpice` run

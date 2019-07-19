@@ -21,6 +21,8 @@ import pandas
 import numpy
 import matplotlib.pyplot as plt
 import stratify
+import argparse
+import glob
 from wrf.constants import Constants as wrf_constants
 
 def compare_variable(gmtb, wrf, ax):
@@ -58,10 +60,8 @@ def compare_models(gmtb, wrf):
     fig, ax = plt.subplots(len(variables), 3, sharey='row', sharex=True)
 
     for i, (name, v) in enumerate(variables.items()):
-        print(i)
         a = gmtb[v[0]]
         b = wrf[v[1]]
-
         compare_variable(a, b, ax[i,:])
 
     ax[0,0].set_title('GMTB Forcing')
@@ -70,8 +70,8 @@ def compare_models(gmtb, wrf):
 
     plt.show()
 
-def main():
-    wrf = xarray.open_dataset('output/twpice-latest/wrfout_d01_2006-01-19_03:00:00')
+def main(gmtb_forcing, wrf_output):
+    wrf = xarray.open_dataset(glob.glob(wrf_output)[0])
     wrf = wrf.isel(south_north=0, west_east=0, south_north_stag=0, west_east_stag=0)
     wrf.coords['PRES'] = wrf['P'] + wrf['PB']
     wrf['THETA'] = wrf['T'] + wrf_constants.T_BASE
@@ -79,11 +79,17 @@ def main():
     w_on_grid = stratify.interpolate(wrf.ZNU, wrf.ZNW, wrf.W, axis=1)
     wrf['W_G'] = (wrf.PRES.dims, w_on_grid)
 
-    gmtb = xarray.open_dataset('../gmtb-scm-release/scm/data/processed_case_input/twpice.nc', 'forcing')
-    gmtb.update(xarray.open_dataset('../gmtb-scm-release/scm/data/processed_case_input/twpice.nc'))
+    gmtb = xarray.open_dataset(gmtb_forcing, 'forcing')
+    gmtb.update(xarray.open_dataset(gmtb_forcing))
     gmtb.coords['time'] = wrf['XTIME'].values[0] + pandas.to_timedelta(gmtb['time'].values, 'seconds')
 
     compare_models(gmtb, wrf)
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gmtb-repo', help='Path to local GMTB repository', required=True)
+    parser.add_argument('testcase', help='Testcase to run')
+    args = parser.parse_args()
+    main(gmtb_forcing=f'{args.gmtb_repo}/scm/data/processed_case_input/{args.testcase}.nc',
+         wrf_output=f'output/{args.testcase}-latest/wrfout_d01*',
+            )
