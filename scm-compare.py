@@ -42,7 +42,7 @@ def compare_variable(gmtb, wrf, ax):
     wrf.plot.pcolormesh('time2', 'PRES', ax=ax[1], vmin=vmin, vmax=vmax)
 
     wrf_on_gmtb = stratify.interpolate(gmtb.levels, wrf.PRES, wrf, axis=1).T[:,::3]
-    (gmtb - wrf_on_gmtb).plot.pcolormesh('time','levels', ax=ax[2])
+    #(gmtb - wrf_on_gmtb).plot.pcolormesh('time','levels', ax=ax[2])
 
     ax[0].set_ylim([100000,0])
 
@@ -67,6 +67,25 @@ def compare_models(gmtb, wrf):
     ax[0,0].set_title('GMTB Forcing')
     ax[0,1].set_title('WRF Output')
     ax[0,2].set_title('Difference')
+
+    plt.show()
+
+    fig, ax = plt.subplots(4, 1, sharey='row', sharex=True)
+    gmtb.T_surf.plot(ax=ax[0], label='GMTB')
+    wrf.T2[1:].plot.line(x='XTIME', ax=ax[0], label='WRF')
+    ax[0].legend()
+    ax[0].set_title('Surface Forcing')
+
+    gmtb.p_surf.plot(ax=ax[1])
+    wrf.PSFC[1:].plot.line(x='XTIME', ax=ax[1])
+
+    if 'lh_flux_sfc' in gmtb:
+        gmtb.lh_flux_sfc.plot(ax=ax[2])
+    wrf.LH[1:].plot.line(x='XTIME', color='orange', ax=ax[2])
+
+    if 'sh_flux_sfc' in gmtb:
+        gmtb.sh_flux_sfc.plot(ax=ax[3])
+    wrf.HFX[1:].plot.line(x='XTIME', color='orange', ax=ax[3])
 
     plt.show()
 

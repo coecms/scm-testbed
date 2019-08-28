@@ -45,17 +45,75 @@ def pressure_to_z(zsfc, T, p):
         p: GMTB pressure levels
     """
     # Following GMTB 'forcing_file_common.py'
+    T = numpy.atleast_2d(T)
     z = numpy.zeros(T.shape)
+    p = numpy.asarray(p)
     z[:,0] = zsfc
     for k in range(p.size - 1):
         dphi = -0.5*R_dry*((T[:,k]+T[:,k+1])/(0.5*(p[k]+p[k+1])))*(p[k+1]-p[k])
         z[:,k+1] = z[:,k]+dphi/g
     return z
 
+def exner_to_z(p_surf, z_surf, theta, qt, p):
+    theta = numpy.asarray(theta)
+    qt = numpy.asarray(qt)
+    p = numpy.asarray(p)
+
+    kappa = R_dry / c_p
+    exner = (p / p0) ** kappa
+
+    dexner = exner[1:] - exner[:-1]
+
+    dtheta = theta[1:] + theta[:-1]
+    dqt = qt[1:] + qt[:-1]
+
+    dz = -dexner * c_p/g * (1.0 + 0.61*0.5*dqt) * 0.5 * dtheta
+
+    z = numpy.zeros(p.shape)
+    z[0] = z_surf
+    for k in range(p.size - 1):
+        z[k+1] = z[k] + dz[k]
+
+    return z
+
+def estimate_T(theta, p):
+    return theta * (p/p0)**(R_dry / c_p)
+
+def test_exner_to_z():
+    ds = xarray.open_dataset('../gmtb-scm-release/scm/data/processed_case_input/bomex.nc', 'initial')
+    ds.update(xarray.open_dataset('../gmtb-scm-release/scm/data/processed_case_input/bomex.nc'))
+
+    theta = ds.thetail
+    qt = ds.qt
+    p_surf = 101500
+    z_surf = 0
+    p = ds.levels
+
+    z = exner_to_z(p_surf, z_surf, theta, qt, p)
+
+    z_expect = ds.height
+    numpy.testing.assert_allclose(z, z_expect, rtol=1e-5)
+
+def test_estimate_T():
+    ds = xarray.open_dataset('../gmtb-scm-release/scm/data/processed_case_input/bomex.nc', 'initial')
+    ds.update(xarray.open_dataset('../gmtb-scm-release/scm/data/processed_case_input/bomex.nc'))
+
+    theta = ds.thetail
+    p = ds.levels
+
+    T = estimate_T(theta, p)
+    z = pressure_to_z(0, T, p)
+
+    z_expect = ds.height
+    numpy.testing.assert_allclose(z[0,:], z_expect, rtol=1e-1)
+
 def qv(qt, ql, qi):
     return qt - ql - qi
 
 def theta(thetail, ql, qi, T):
+    if (T == 0).any():
+        return thetail
+
     return thetail/(1-(L_v/c_p*ql+L_s/c_p*qi)/T)
 
 
@@ -114,7 +172,7 @@ class gmtbWRFTest():
         # Write out sounding file as a space-separated table
         with open(self.workdir / 'input_sounding', 'w') as f:
             print(zsfc, usfc, vsfc, Tsfc, qvsfc, psfc, file=f)
-            sounding.isel(levels=slice(1,None)).to_dataframe().to_csv(f, columns=['z','u','v','theta','qv'], sep=' ', index=False, header=False)
+            sounding.isel(levels=slice(1,None)).to_dataframe().to_csv(f, columns=['z','u','v','theta','qv'], sep=' ', na_rep='nan', index=False, header=False)
 
 
     def setup_namelist(self, casenml, start, lat, lon, ztop, forcing_levels):
@@ -164,10 +222,14 @@ class gmtbWRFTest():
         wrfnml['time_control']['end_second'] = end.second
 
         # Round up max height to next km
-        wrfnml['domains']['ztop'] = ceil(ztop / 1000) * 1000
+        ztop = ceil(ztop / 1000) * 1000
+        if ztop < 5000:
+            ztop = 5000
+        wrfnml['domains']['ztop'] = ztop
 
         # Turn on forcing variables
         wrfnml['scm']['scm_force'] = 1
+        wrfnml['scm']['scm_force_flux'] = 1
         wrfnml['scm']['scm_force_wind_largescale'] = True
         wrfnml['scm']['scm_force_qv_largescale'] = True
         wrfnml['scm']['scm_vert_adv'] = True
@@ -185,7 +247,7 @@ class gmtbWRFTest():
             wrfnml.write(f)
 
 
-    def setup_forcing(self, casenml, zsfc, forcing):
+    def setup_forcing(self, casenml, initial, forcing):
         """
         Setup SCM forcing file by converting GMTB values
 
@@ -195,7 +257,21 @@ class gmtbWRFTest():
             forcing: GMTB forcing
         """
         # Convert pressure levels to heights
-        z = pressure_to_z(zsfc, forcing.T_nudge.T, forcing.levels)
+
+        # Start with nudged temperature
+        T = forcing.T_nudge
+
+        # Else convert the nudged theta to temperature
+        if numpy.all(T == 0):
+            theta = forcing.thil_nudge
+            T = estimate_T(theta, forcing.levels)
+
+        if numpy.all(T > 0):
+            # Valid temperature field, time varying Z
+            z = pressure_to_z(initial.height[0], T.T, forcing.levels)
+        else:
+            # Invalid temperature field, static Z
+            z = numpy.repeat(numpy.atleast_2d(initial.height), forcing.dims['time'], axis=0)
 
         # Setup WRF times
         Times = numpy.datetime_as_string(forcing.time, unit='s')
@@ -207,6 +283,11 @@ class gmtbWRFTest():
         # Large-scale Timescale    
         domain = 4000
         wind_mag = numpy.sqrt(forcing.u_nudge**2 + forcing.v_nudge**2)
+
+        if numpy.all(wind_mag == 0):
+            wind_mag = numpy.sqrt(initial.u**2 + initial.v**2)
+            wind_mag = numpy.repeat(numpy.atleast_2d(wind_mag), forcing.dims['time'], axis=0).T
+
         tau = domain/(2*wind_mag)
 
         wrf_forcing = xarray.Dataset({
@@ -219,9 +300,11 @@ class gmtbWRFTest():
                 'V_LARGESCALE': forcing.v_nudge,
                 'QV_LARGESCALE': forcing.qt_nudge,
                 'TH_LARGESCALE': forcing.thil_nudge,
-                'TAU_LARGESCALE': tau,
+                'TAU_LARGESCALE': (['levels','time'], tau),
                 'SURFACE_T': forcing.T_surf,
                 'SURFACE_P': forcing.p_surf,
+                'HFX_FORCE': forcing.get('sh_flux_sfc', zero),
+                'LH_FORCE': forcing.get('lh_flux_sfc', zero),
                 #'TH_UPSTREAM_X': zero,
                 #'TH_UPSTREAM_Y': zero,
                 #'QV_UPSTREAM_X': zero,
@@ -320,7 +403,7 @@ class gmtbWRFTest():
 
         self.setup_namelist(casenml, start, forcing.lat.data[0], forcing.lon.data[0], ztop, len(initial.height))
 
-        self.setup_forcing(casenml, zsfc, forcing)
+        self.setup_forcing(casenml, initial, forcing)
 
 
     def run_testcase(self):
